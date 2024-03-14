@@ -1,0 +1,363 @@
+﻿Program.Sub.Preflight.Start
+	v.Global.sPrefixScanGun.Declare(string,"%$")
+Program.Sub.Preflight.End
+
+Program.Sub.Main.Start
+	f.Intrinsic.Control.Try
+		v.Local.sRet.Declare(string)
+		
+		'Make sure custom folder is set up for error handling on core transactions and general GAB errors
+		f.Intrinsic.Control.CallSub(Initialize)
+		
+		f.Intrinsic.Control.If(v.Caller.Hook,=,31951,or,v.Caller.Hook,=,39002,v.Caller.Hook,=,39003)
+			f.Intrinsic.control.if(v.caller.hook,=,31951)
+				F.Global.Mobile.GetCustomLine(V.Passed.LINE-ID,v.Local.sRet)
+			f.intrinsic.control.else
+				F.Global.Mobile.GetCustomLine(V.Passed.DATA-TRANSID,v.Local.sRet)
+			f.intrinsic.control.endif
+			
+			f.Intrinsic.Control.If(v.Local.sRet.Trim,=,"")
+				f.Intrinsic.Control.CallSub("Write_Result_And_End_Program","sResult","Cannot find custom Transaction ID")
+			f.Intrinsic.Control.Else
+				f.Intrinsic.Control.If(v.Caller.Hook,=,31951)
+					'WipBin Receipt
+					f.Intrinsic.Control.CallSub("Process_WIPBin_Receipt","sCustomData",v.Local.sRet)		
+				f.Intrinsic.Control.Else
+					'WipBin to WipBin
+					f.Intrinsic.Control.CallSub("Process_WIPBin_to_WIPBin","sCustomData",v.Local.sRet)
+				f.Intrinsic.Control.EndIf		
+			f.Intrinsic.Control.EndIf
+			'End program
+			F.Intrinsic.Control.End
+		f.Intrinsic.Control.EndIf
+	f.Intrinsic.Control.Catch
+		f.Intrinsic.Control.CallSub(ErrorMsg, CurrentSub, v.Ambient.CurrentSubroutine)
+	f.Intrinsic.Control.EndTry
+Program.Sub.Main.End
+
+Program.Sub.Write_Result_And_End_Program.Start
+'When the script completes running, this sub will write back the result message(HTML format) to the scanning gun's screen. 
+'The v.args.sResult passed in can be a final static string, or culmulated results and stored in v.Global.sResult
+F.Intrinsic.Control.SetErrorHandler("Write_Result_And_End_Program")
+F.Intrinsic.Control.ClearErrors
+	v.Local.sError.Declare
+	v.Local.sResult.Declare
+	
+	f.Intrinsic.String.Build("<div><table width="100%"><tr><td><table align="center"><tr><td align="center" colspan="1" style=" background-color:#F5F5DC;">{0}</td></tr></table></td></tr></table></div>",v.Args.sResult,v.Local.sResult) 
+	F.Global.Mobile.SetCustomResult(v.Caller.CompanyCode,V.Passed.DATA-TRANSID,v.local.sResult)
+	f.Intrinsic.Control.CallSub("Unload")
+	f.Intrinsic.Control.ExitSub
+
+F.Intrinsic.Control.Label("Write_Result_And_End_Program")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Project: Project",V.Ambient.Newline,V.Ambient.Newline,"Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+	f.Intrinsic.Control.End
+Function.Intrinsic.Control.EndIf
+Program.Sub.Write_Result_And_End_Program.End
+
+Program.Sub.ErrorMsg.Start
+v.Local.sError.Declare
+
+'Closes ODBC connection, default to connection : "con"
+f.Intrinsic.Control.If(v.ODBC!con.State, =, 1)
+	f.ODBC.Connection!con.Close
+f.Intrinsic.Control.EndIf
+
+'Generic Error message.
+f.Intrinsic.String.Build("Project GCG_5754_WIPBinTransfer.g2u {0}{0}Subroutine: {1}{0}Error: {2} with Description: {3}", v.Ambient.NewLine, v.Args.CurrentSub, v.Ambient.ErrorNumber, v.Ambient.ErrorDescription, v.Local.sError)
+f.Intrinsic.UI.Msgbox(v.Local.sError)
+Program.Sub.ErrorMsg.End
+
+Program.Sub.Process_WIPBin_Receipt.Start
+	'All material from the WO seq must be moved to the bin selected by the user
+	v.Local.sSQL.Declare(string)
+	v.Local.sParams.Declare(string)
+	v.Local.sRet.Declare(string)
+	v.Local.bWIPBin.Declare(boolean,False)
+	v.Local.sJobSeq.Declare(string)
+	v.local.fQty_Transfer.Declare(float)
+	v.Local.sErrorMsg.Declare(string)
+	v.Local.sErrorFile.Declare(string)
+	
+	f.Intrinsic.Control.Try
+		f.ODBC.Connection!Con.opencompanyconnection
+		
+		'Split the data
+		f.Intrinsic.String.Split(v.Args.sCustomData,"*!*",v.Local.sParams)
+		
+		'Verify that the bin selected is a WIP bin
+		F.Intrinsic.String.Build("SELECT BIN FROM V_BIN_MASTER WHERE BIN='{0}' AND STAGING_BIN='B';",V.Local.sParams(3),V.Local.sSQL)
+		f.ODBC.Connection!Con.executeandreturn(v.Local.sSQL,v.Local.sRet)
+		f.Intrinsic.Control.If(v.Local.sRet,!=,"")
+			v.Local.bWIPBin.Set(True)
+		f.Intrinsic.Control.EndIf
+		
+		'Get the job+suffix+seq.
+		f.Intrinsic.String.Build("select job, suffix, sequence, recv_to_job, part, location from v_po_lines where purchase_order='{0}' and left(record_no,3)='{1}';",v.Local.sParams(1),v.Local.sParams(2),v.Local.sSQL)
+		f.ODBC.Connection!Con.executeandreturn(v.Local.sSQL,v.Local.sRet)
+		f.Intrinsic.String.Split(v.Local.sRet,"*!*",v.Local.sJobSeq)
+		
+		'If the PO line is not receive to job, exit silently.
+		f.Intrinsic.Control.If(v.Local.sJobSeq(0),=,"")
+			f.Intrinsic.Control.End
+		f.Intrinsic.Control.EndIf
+		
+		'If there is no job on this line, exit.  Else, verify that the bin selected when the PO line was received is a WIP bin.
+		f.Intrinsic.Control.if(v.Local.sJobSeq(0),=,"")
+			f.Intrinsic.String.Build("{0}Error:No job attached to PO line{1}",v.Local.sErrorMsg,v.Ambient.NewLine,v.Local.sErrorMsg)
+		f.Intrinsic.Control.EndIf
+		
+		'If bin selected is not a WIP bin, exit.
+		f.Intrinsic.Control.If(v.Local.bWIPBin,=,False)
+			f.Intrinsic.String.Build("{0}Error:Bin selected is not a WIP bin{1}",v.Local.sErrorMsg,v.Ambient.NewLine,v.Local.sErrorMsg)
+		f.Intrinsic.Control.EndIf
+		
+		'If there are any errors, write them to an error log and exit
+		f.Intrinsic.Control.If(v.Local.sErrorMsg,!=,"")
+			f.Intrinsic.String.Build("PO:{0} Line:{1}{2}{3}",v.Local.sParams(1),v.Local.sParams(2),v.Ambient.NewLine,v.Local.sErrorMsg,v.Local.sErrorMsg)
+			f.Intrinsic.String.Build("{0}\CUSTOM\GCG_5754\Error{1} {2}.txt",v.Caller.GlobalDir,v.Ambient.date.FORMATYYYYMMDD,v.Ambient.Time.String,v.Local.sErrorFile)
+			f.Intrinsic.File.String2File(v.Local.sErrorFile,v.Local.sErrorMsg)
+			f.Intrinsic.Control.End
+		f.Intrinsic.Control.EndIf
+		
+		'Convert the amount RECEIVED
+		f.Intrinsic.Math.Div(v.Local.sParams(22),10000,v.Local.fQty_Transfer)
+		
+		'Get the amount currently in that WIP Bin
+		v.Local.sRet.Redim(0,0)
+		f.Intrinsic.String.Build("select qty_bin from v_wip_bin where job='{0}' and suffix='{1}' and sequence='{2}' and bin='{3}';",v.Local.sJobSeq(0),v.Local.sJobSeq(1),v.Local.sJobSeq(2),V.Local.sParams(3),v.Local.sSQL)
+		f.ODBC.Connection!Con.executeandreturn(v.Local.sSQL,v.Local.sRet)
+			
+		'Transfer to a WIP bin
+		f.Intrinsic.Control.If(v.Local.sRet,=,"")
+			f.Intrinsic.String.Build("Insert into WIP_Bin (Job,Suffix,Sequence,Part,Location,Bin,Description,Qty_Bin,Date_WipBin,Bin_User) values ('{0}','{1}','{2}','{3}','{4}','{5}','{6}','{7}','{8}','{9}')",v.Local.sJobSeq(0),v.Local.sJobSeq(1),v.Local.sJobSeq(2),v.Local.sJobSeq(4),v.Local.sJobSeq(5),V.Local.sParams(3),"Transferred at GS Mobile",v.Local.fQty_Transfer,v.Ambient.Date.FormatYYYYMMDD,v.Caller.User,v.Local.sSQL)	
+		f.Intrinsic.Control.Else
+			f.Intrinsic.String.Build("Update WIP_BIN set Qty_Bin = Qty_Bin + {3} where job='{0}' and suffix='{1}' and sequence='{2}'",v.Local.sJobSeq(0),v.Local.sJobSeq(1),v.Local.sJobSeq(2),v.Local.fQty_Transfer,v.Local.sSQL)
+		f.Intrinsic.Control.EndIf
+		
+		f.ODBC.Connection!Con.execute(v.Local.sSQL)
+	f.Intrinsic.Control.Catch
+		f.Intrinsic.Control.If(v.Local.sErrorMsg,!=,"")
+			f.Intrinsic.String.Build("Project GCG_5754_WIPBinTransfer.g2u {0}{0}Subroutine: {1}{0}Error: {2} with Description: {3}", v.Ambient.NewLine, v.Args.CurrentSub, v.Ambient.ErrorNumber, v.Ambient.ErrorDescription, v.Local.sErrorMsg)
+			f.Intrinsic.String.Build("{0}\CUSTOM\GCG_5754\Error{1} {2}.txt",v.Caller.GlobalDir,v.Ambient.date.FORMATYYYYMMDD,v.Ambient.Time.String,v.Local.sErrorFile)
+			f.Intrinsic.File.String2File(v.Local.sErrorFile,v.Local.sErrorMsg)
+			f.Intrinsic.Control.End
+		f.Intrinsic.Control.EndIf
+	f.Intrinsic.Control.Finally
+		f.ODBC.Connection!Con.close
+	f.Intrinsic.Control.EndTry
+Program.Sub.Process_WIPBin_Receipt.End
+
+Program.Sub.Process_WIPBin_to_WIPBin.Start
+F.Intrinsic.Control.SetErrorHandler("Process_WIPBin_to_WIPBin")
+F.Intrinsic.Control.ClearErrors
+	v.Local.sError.Declare
+	v.Local.sRet.Declare
+	v.Local.sRet2.Declare
+	v.Local.sSQL.Declare
+	v.Local.sFromWO.Declare
+	v.Local.sFromSuf.Declare
+	v.Local.sFromSeq.Declare
+	v.Local.sFromBin.Declare
+	v.Local.sToBin.Declare	
+	v.Local.fQty_Transfer.Declare
+	v.Local.fQty_Bin.Declare
+	v.Local.iCnt.Declare
+	v.Local.sRow.Declare
+	v.Local.sOutput.Declare
+	v.Local.sHold.Declare
+	v.Local.sJob.Declare
+	v.Local.sSuf.Declare
+	v.Local.sSeq.Declare
+	v.Local.sPart.Declare
+	v.Local.sLoc.Declare	
+	v.Local.bNumeric.Declare
+	v.Local.bWIPBin.Declare(boolean)
+	v.Local.sMode.Declare(string)
+	
+	F.ODBC.Connection!Conx.OpenConnection(Variable.ambient.PDSN,Variable.Ambient.PUSER,Variable.Ambient.PPass,600)
+	
+	'Get input from the screen
+	f.Intrinsic.String.Split(v.Args.sCustomData,"*!*",v.Local.sRet)	
+	'Job/Suf/Seq
+	f.Intrinsic.String.Replace(v.Local.sRet(1).Trim,v.Global.sPrefixScanGun,"",v.Local.sRet(1))
+'	f.Intrinsic.String.LPad(v.Local.sRet(1),"0",6,v.Local.sRet(1))
+	F.Intrinsic.String.Left(V.Local.sRet(1),6,V.Local.sJob)
+	F.Intrinsic.String.Mid(V.Local.sRet(1),7,3,V.Local.sSuf)
+	F.Intrinsic.String.Right(V.Local.sRet(1),6,V.Local.sSeq)
+'	'Suffix
+'	f.Intrinsic.String.Replace(v.Local.sRet(2).Trim,v.Global.sPrefixScanGun,"",v.Local.sRet(2))
+'	f.Intrinsic.String.LPad(v.Local.sRet(2),"0",3,v.Local.sRet(2))
+'	'Seq
+'	f.Intrinsic.String.Replace(v.Local.sRet(3).Trim,v.Global.sPrefixScanGun,"",v.Local.sRet(3))
+'	f.Intrinsic.String.LPad(v.Local.sRet(3),"0",6,v.Local.sRet(3))
+	'From Bin
+'	f.Intrinsic.String.Replace(v.Local.sRet(5).Trim,v.Global.sPrefixScanGun,"",v.Local.sRet(5))
+	f.Intrinsic.String.Replace(v.Local.sRet(3).Trim,v.Global.sPrefixScanGun,"",v.Local.sRet(3))
+	'To Bin
+'	f.Intrinsic.String.Replace(v.Local.sRet(7).Trim,v.Global.sPrefixScanGun,"",v.Local.sRet(7))
+	f.Intrinsic.String.Replace(v.Local.sRet(5).Trim,v.Global.sPrefixScanGun,"",v.Local.sRet(5))
+	
+	''Validation
+'	'Qty Transferred must be numeric
+'	f.Intrinsic.Math.IsNumeric(v.Local.sHold,v.local.bnumeric)
+'	f.Intrinsic.Control.If(v.Local.bNumeric.Not)
+'		f.Intrinsic.Control.CallSub("Write_Result_And_End_Program","sResult","Quantity Transferred must be numeric.")
+'		f.ODBC.Connection!Conx.Close
+'		f.Intrinsic.Control.ExitSub		
+'	f.Intrinsic.Control.EndIf
+'	v.Local.fQty_Transfer.Set(v.Local.sHold)	
+
+	'User must have filled out either Job+Suffix+Seq -OR- From Bin.  
+'	f.Intrinsic.Control.If(v.Local.sRet(1),=,"000000",or,v.Local.sRet(2),=,"000",v.Local.sRet(3),=,"000000")
+	f.Intrinsic.Control.If(V.Local.sJob,=,"000000",or,V.Local.sSuf,=,"000",V.Local.sSeq,=,"000000")
+		'From Bin (if filled out) must be a WIP bin
+'		f.Intrinsic.Control.If(v.Local.sRet(5),!=,"")
+		f.Intrinsic.Control.If(v.Local.sRet(3),!=,"")
+			F.Intrinsic.String.Build("SELECT BIN FROM V_BIN_MASTER WHERE RTRIM(BIN)='{0}' AND STAGING_BIN='B';",V.Local.sRet(3),V.Local.sSQL)
+			f.ODBC.Connection!Conx.executeandreturn(v.Local.sSQL,v.Local.sRet2)
+			f.Intrinsic.Control.If(v.Local.sRet2,=,"")
+				f.Intrinsic.Control.CallSub("Write_Result_And_End_Program","sResult","From Bin is not a WIP Bin.")
+				f.ODBC.Connection!Conx.Close
+				f.Intrinsic.Control.ExitSub	
+			f.Intrinsic.Control.EndIf
+			
+			'Check From Bin qty if Job+Suffix+Seq was not filled out
+			F.Intrinsic.String.Build("Select sum(Qty_Bin) as Qty_Bin from WIP_Bin where BIN='{0}'",v.Local.sRet(3),v.Local.sSQL)
+			F.ODBC.Connection!Conx.EXECUTEANDRETURN(V.Local.sSQL,V.Local.sRet2)
+			F.Intrinsic.Control.If(V.Local.sRet2,=,"")
+				V.Local.fQty_Bin.Set(0)
+			F.Intrinsic.Control.Else
+				V.Local.fQty_Bin.Set(V.Local.sRet2.Float)
+			F.Intrinsic.Control.EndIf
+			f.Intrinsic.Control.If(v.Local.fQty_Bin,=,0)
+				f.Intrinsic.Control.CallSub("Write_Result_And_End_Program","sResult","From Bin has 0 WIP Bin Quantity.")
+				f.ODBC.Connection!Conx.Close
+				f.Intrinsic.Control.ExitSub
+			f.Intrinsic.Control.EndIf
+			v.Local.sMode.Set("FromBin")
+			'Get all job sequences in the From Bin
+			F.Intrinsic.String.Build("Select Qty_Bin,Job,Suffix,Sequence,Part,Location,Bin from WIP_Bin where bin = '{0}'",v.Local.sRet(3),v.Local.sSQL)
+			f.Data.DataTable.CreateFromSQL("dtWIPInBin","conx",v.Local.sSQL)
+		f.Intrinsic.Control.Else
+			f.Intrinsic.Control.CallSub("Write_Result_And_End_Program","sResult","User must fill out either Job+Suffix+Seq or From Bin.")
+			f.ODBC.Connection!Conx.Close
+			f.Intrinsic.Control.ExitSub
+		f.Intrinsic.Control.EndIf
+	f.Intrinsic.Control.Else
+		'Check WO Seq presence in WIP bins
+		F.Intrinsic.String.Build("Select sum(Qty_Bin) as Qty_Bin,Job,Suffix,Sequence,Part,Location from WIP_Bin where Job='{0}' and Suffix='{1}' and Sequence='{2}' and bin <> '{3}' group by Job,Suffix,Sequence,Part,Location",V.Local.sJob,V.Local.sSuf,V.Local.sSeq,v.Local.sRet(5),v.Local.sSQL)
+		f.ODBC.Connection!Conx.ExecuteAndReturn(v.Local.sSQL,v.Local.sRet2)
+		f.Intrinsic.Control.If(v.Local.sRet2.Trim,=,"")
+			f.Intrinsic.Control.CallSub("Write_Result_And_End_Program","sResult","WO Sequence material is not present in any WIP Bin.")
+			f.ODBC.Connection!Conx.Close
+			f.Intrinsic.Control.ExitSub
+		f.Intrinsic.Control.EndIf
+		f.Intrinsic.String.Split(v.Local.sRet2,"*!*",v.Local.sRet2)
+		v.Local.fQty_Bin.Set(v.Local.sRet2(0))
+		v.Local.sJob.Set(v.Local.sRet2(1))
+		v.Local.sSuf.Set(v.Local.sRet2(2))
+		v.Local.sSeq.Set(v.Local.sRet2(3))
+		v.Local.sPart.Set(v.Local.sRet2(4))
+		v.Local.sLoc.Set(v.Local.sRet2(5))	
+		f.Intrinsic.Control.If(v.Local.fQty_Bin,=,0)
+			f.Intrinsic.Control.CallSub("Write_Result_And_End_Program","sResult","WO Sequence has 0 WIP Bin Quantity.")
+			f.ODBC.Connection!Conx.Close
+			f.Intrinsic.Control.ExitSub
+		f.Intrinsic.Control.EndIf
+		v.Local.sMode.Set("JSS")
+	f.Intrinsic.Control.EndIf
+	
+	'To Bin must be filled out and must be a WIP bin
+	v.Local.sRet2.Redim(0,0)
+	f.Intrinsic.Control.If(v.Local.sRet(5),=,"")
+		f.Intrinsic.Control.CallSub("Write_Result_And_End_Program","sResult","To Bin must be filled out.")
+		f.ODBC.Connection!Conx.Close
+		f.Intrinsic.Control.ExitSub
+	f.Intrinsic.Control.Else
+		F.Intrinsic.String.Build("SELECT BIN FROM V_BIN_MASTER WHERE RTRIM(BIN)='{0}' AND STAGING_BIN='B';",V.Local.sRet(5),V.Local.sSQL)
+		f.ODBC.Connection!Conx.executeandreturn(v.Local.sSQL,v.Local.sRet2)
+		f.Intrinsic.Control.If(v.Local.sRet2,=,"")
+			f.Intrinsic.Control.CallSub("Write_Result_And_End_Program","sResult","To Bin is not a WIP Bin.")
+			f.ODBC.Connection!Conx.Close
+			f.Intrinsic.Control.ExitSub	
+		f.Intrinsic.Control.EndIf
+	f.Intrinsic.Control.EndIf
+	
+	'From Bin # To Bin
+	f.Intrinsic.Control.If(v.Local.sRet(3),=,v.Local.sRet(5))
+		f.Intrinsic.Control.CallSub("Write_Result_And_End_Program","sResult","From Bin and To Bin must be different.")
+		f.ODBC.Connection!Conx.Close
+		f.Intrinsic.Control.ExitSub		
+	f.Intrinsic.Control.EndIf
+
+	'Process using the job+suffix+sequence
+	f.Intrinsic.Control.If(v.Local.sMode,=,"JSS")
+		'First, add quantity to To Bin
+		F.Intrinsic.String.Build("Select sum(Qty_Bin) as Qty_Bin from WIP_Bin where Job='{0}' and Suffix='{1}' and Sequence='{2}' and bin='{3}';",v.Local.sJob,v.Local.sSuf,v.Local.sSeq,v.Local.sRet(5),v.Local.sSQL)
+		f.ODBC.Connection!Conx.ExecuteAndReturn(v.Local.sSQL,v.Local.sRet2)
+		f.Intrinsic.Control.If(v.Local.sRet2.Trim,=,"")
+			f.Intrinsic.String.Build("Insert into WIP_Bin (Job,Suffix,Sequence,Part,Location,Bin,Description,Qty_Bin,Date_WipBin,Bin_User) values ('{0}','{1}','{2}','{3}','{4}','{5}','{6}','{7}','{8}','{9}')",v.Local.sJob,v.Local.sSuf,v.Local.sSeq,v.Local.sPart.PSQLFriendly,v.Local.sLoc,v.Local.sRet(5),"Transferred at GS Mobile",v.Local.fQty_Bin,v.Ambient.Date.FormatYYYYMMDD,v.Caller.User,v.Local.sSQL)		
+		f.Intrinsic.Control.Else
+			f.Intrinsic.String.Build("Update WIP_Bin set Description = '{4}',Qty_Bin = Qty_Bin + {5},Date_WipBin = '{6}',Bin_User = '{7}' where Job = '{0}' and  Suffix = '{1}' and Sequence = '{2}' and bin='{3}'", v.Local.sJob,v.Local.sSuf,v.Local.sSeq,v.Local.sRet(5),"Transferred at GS Mobile",v.Local.fQty_Bin,v.Ambient.Date.FormatYYYYMMDD,v.Caller.User,v.Local.sSQL)			
+		f.Intrinsic.Control.EndIf
+		
+		f.ODBC.Connection!Conx.Execute(v.Local.sSQL)
+		
+		'Next, clear out the From Bin
+		f.Intrinsic.String.Build("delete from wip_bin where job='{0}' and suffix='{1}' and sequence='{2}' and bin <> '{3}';",v.Local.sJob,v.Local.sSuf,v.Local.sSeq,v.Local.sRet(5),v.Local.sSQL)
+		f.ODBC.Connection!Conx.Execute(v.Local.sSQL)
+		
+		'Write feedback to user
+		f.Intrinsic.String.Build("All material from Job {0}-{1} Seq {2} transferred to bin {3}",v.Local.sJob,v.Local.sSuf,v.Local.sSeq,v.Local.sRet(5),v.Local.sOutput)
+		f.Intrinsic.Control.CallSub("Write_Result_And_End_Program","sResult",v.Local.sOutput)
+	'Process using the From Bin
+	f.Intrinsic.Control.Else
+		'Loop through the datatable of jobs and move each one
+		f.Intrinsic.Control.For(v.Local.iCnt,0,v.DataTable.dtWIPInBin.RowCount--,1)
+			F.Intrinsic.String.Build("Select sum(Qty_Bin) as Qty_Bin from WIP_Bin where Job='{0}' and Suffix='{1}' and Sequence='{2}' and bin='{3}';",v.DataTable.dtWIPInBin(v.Local.iCnt).Job!FieldVal,v.DataTable.dtWIPInBin(v.Local.iCnt).Suffix!FieldVal,v.DataTable.dtWIPInBin(v.Local.iCnt).Sequence!FieldVal,v.Local.sRet(5),v.Local.sSQL)
+			f.ODBC.Connection!Conx.ExecuteAndReturn(v.Local.sSQL,v.Local.sRet2)
+			
+			f.Intrinsic.Control.If(v.Local.sRet2.Trim,=,"")
+				f.Intrinsic.String.Build("Insert into WIP_Bin (Job,Suffix,Sequence,Part,Location,Bin,Description,Qty_Bin,Date_WipBin,Bin_User) values ('{0}','{1}','{2}','{3}','{4}','{5}','{6}','{7}','{8}','{9}')",v.DataTable.dtWIPInBin(v.Local.iCnt).Job!FieldVal,v.DataTable.dtWIPInBin(v.Local.iCnt).Suffix!FieldVal,v.DataTable.dtWIPInBin(v.Local.iCnt).Sequence!FieldVal,v.DataTable.dtWIPInBin(v.Local.iCnt).Part!FieldVal,v.DataTable.dtWIPInBin(v.Local.iCnt).Location!FieldVal,v.Local.sRet(5),"Transferred at GS Mobile",v.DataTable.dtWIPInBin(v.Local.iCnt).Qty_Bin!FieldVal,v.Ambient.Date.FormatYYYYMMDD,v.Caller.User,v.Local.sSQL)		
+			f.Intrinsic.Control.Else
+				f.Intrinsic.String.Build("Update WIP_Bin set Description = '{4}',Qty_Bin = Qty_Bin + {5},Date_WipBin = '{6}',Bin_User = '{7}' where Job = '{0}' and  Suffix = '{1}' and Sequence = '{2}' and bin='{3}'", v.DataTable.dtWIPInBin(v.Local.iCnt).Job!FieldVal,v.DataTable.dtWIPInBin(v.Local.iCnt).Suffix!FieldVal,v.DataTable.dtWIPInBin(v.Local.iCnt).Sequence!FieldVal,v.Local.sRet(5),"Transferred at GS Mobile",v.DataTable.dtWIPInBin(v.Local.iCnt).Qty_Bin!FieldVal,v.Ambient.Date.FormatYYYYMMDD,v.Caller.User,v.Local.sSQL)			
+			f.Intrinsic.Control.EndIf
+			
+			f.ODBC.Connection!Conx.Execute(v.Local.sSQL)
+			
+			'Delete the corresponding record
+			f.Intrinsic.String.Build("delete from wip_bin where job='{0}' and suffix='{1}' and sequence='{2}' and bin='{3}';",v.DataTable.dtWIPInBin(v.Local.iCnt).Job!FieldVal,v.DataTable.dtWIPInBin(v.Local.iCnt).Suffix!FieldVal,v.DataTable.dtWIPInBin(v.Local.iCnt).Sequence!FieldVal,v.DataTable.dtWIPInBin(v.Local.iCnt).Bin!FieldVal,v.Local.sSQL)
+			f.ODBC.Connection!Conx.Execute(v.Local.sSQL)
+		f.Intrinsic.Control.Next(v.Local.iCnt)
+		
+		'Write feedback to user
+		f.Intrinsic.String.Build("All material from bin {0} transferred to bin {1}",v.Local.sRet(3),v.Local.sRet(5),v.Local.sOutput)
+		f.Intrinsic.Control.CallSub("Write_Result_And_End_Program","sResult",v.Local.sOutput)
+	f.Intrinsic.Control.EndIf
+	
+	f.ODBC.Connection!Conx.Close	
+	f.Intrinsic.Control.ExitSub
+
+F.Intrinsic.Control.Label("Process_WIPBin_to_WIPBin")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Project: GCG_5754_WIPBinTransfer.g2u",V.Ambient.Newline,V.Ambient.Newline,"Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+	f.Intrinsic.Control.CallSub("Write_Result_And_End_Program","sResult",v.Local.sError)
+Function.Intrinsic.Control.EndIf
+Program.Sub.Process_WIPBin_to_WIPBin.End
+
+Program.Sub.Initialize.Start
+	v.Local.bExists.Declare(boolean)
+	v.Local.sFilePath.Declare(string)
+	
+	f.Intrinsic.String.Build("{0}\CUSTOM\GCG_5754\",V.Caller.GlobalDir,V.Local.sFilePath)
+	f.Intrinsic.File.DirExists(v.Local.sFilePath,v.Local.bExists)
+	f.Intrinsic.Control.If(v.Local.bExists,=,False)
+		f.Intrinsic.File.CreateDir(v.Local.sFilePath)
+	f.Intrinsic.Control.EndIf
+Program.Sub.Initialize.End
+
+Program.Sub.Comments.Start
+${$5$}$2.0.0.0$}$2
+${$6$}$bbaker$}$20200529100218317$}$pM7xsHplA2E9VCTenDTJ47gi1rF/t66WmeiRH8f36vanSCHnuU9qPdbRIGpIM28tMj058jZZ50A=
+Program.Sub.Comments.End
